@@ -5,6 +5,8 @@ import secrets
 import shutil
 import threading
 import uuid
+import time
+import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, urljoin
@@ -17,6 +19,7 @@ from pydantic import BaseModel, Field
 from .storage import Store, now
 from .audio import decode, read_wav, split_pauses, align_words, new_segment
 from .asr import Recognizer, direct_opener
+from .transcripts import TranscriptParser, model_sentences, align_reference, is_announcement, preserve_practice
 
 
 class SplitOptions(BaseModel):
@@ -55,6 +58,31 @@ def create_app(data_root: Path, model_root: Path, assets: Path):
     app.state.executor = executor
     app.state.token = token
     app.state.jobs = jobs
+
+    def entry_for(c):
+        if not c.get('source_id'): return None
+        return next((e for e in json.loads((assets/'catalog.json').read_text('utf-8')) if e['id']==c['source_id']),None)
+
+    def reference_for(c, report):
+        entry=entry_for(c)
+        if not entry: return None
+        cached=store.folder(c['id'])/'reference.json'
+        if cached.exists(): return json.loads(cached.read_text('utf-8'))
+        report(2,'正在读取网上现成听力文本…')
+        # Only catalog-owned URLs, never a URL supplied by an API caller.
+        request=urllib.request.Request(entry['source_url'],headers={'User-Agent':'Mozilla/5.0'})
+        with direct_opener().open(request,timeout=30) as response:
+            html=response.read(5*1024*1024).decode('utf-8')
+        parser=TranscriptParser(entry['section']);parser.feed(html)
+        if sum(len(x) for x in parser.lines)<100: raise ValueError('来源页面没有可用的分节文本。')
+        reference=dict(lines=parser.lines,url=entry['source_url'],fetched=now())
+        cached.write_text(json.dumps(reference,ensure_ascii=False),'utf-8')
+        return reference
+
+    def ensure_no_jobs():
+        with job_lock:
+            if any(j['status'] in ('queued','running') for j in jobs.values()):
+                raise HTTPException(409,'请先等待所有下载和识别任务完成。')
 
     @app.middleware('http')
     async def local_only(request: Request, call_next):
@@ -141,7 +169,7 @@ def create_app(data_root: Path, model_root: Path, assets: Path):
     def status():
         with job_lock:
             pending = [j.copy() for j in jobs.values() if j['status'] in ('queued','running')]
-        return dict(version='0.2.0',model_ready=recognizer.ready(),jobs=pending,data_path=str(data_root))
+        return dict(version='0.3.0',model_ready=recognizer.ready(),jobs=pending,data_path=str(data_root))
 
     @app.get('/api/library')
     def library():
@@ -149,7 +177,9 @@ def create_app(data_root: Path, model_root: Path, assets: Path):
 
     @app.get('/api/courses/{course_id}')
     def get_course(course_id: str):
-        return course(course_id)
+        c=course(course_id)
+        c['audio_cached']=(store.folder(course_id)/'audio.wav').exists()
+        return c
 
     @app.get('/api/courses/{course_id}/audio')
     def audio(course_id: str):
@@ -286,13 +316,92 @@ def create_app(data_root: Path, model_root: Path, assets: Path):
         course(course_id)
         ensure_idle(course_id)
         def work(report):
-            words,raw=recognizer.transcribe(store.folder(course_id)/'audio.wav',report)
+            c=course(course_id)
+            reference=None; reference_error=None
+            try: reference=reference_for(c,report)
+            except Exception as exc: reference_error=str(exc)
+            words,raw=c.get('words',[]),c.get('asr_raw',[])
+            if not words:
+                report(3,'正在本地定位音频时间戳…' if reference else '正在本地识别未知音频…')
+                words,raw=recognizer.transcribe(store.folder(course_id)/'audio.wav',report)
+            segments=model_sentences(words,c['duration'])
+            metadata=dict(kind='asr',warning=reference_error)
+            if reference:
+                try:
+                    segments,coverage=align_reference(reference['lines'],words,c['duration'])
+                    metadata=dict(kind='web',url=reference['url'],coverage=coverage)
+                    announcements=[s for s in model_sentences(words,c['duration']) if is_announcement(s['text']) and not any(min(s['end'],r['end'])-max(s['start'],r['start'])>.1 for r in segments)]
+                    for s in announcements: s['announcement']=True
+                    segments=sorted(segments+announcements,key=lambda s:s['start'])
+                except ValueError as exc:
+                    metadata=dict(kind='asr',warning=str(exc),url=reference['url'])
+            if not segments: raise ValueError('未得到可靠的句子，请检查音频。')
+            for s in segments: s['announcement']=is_announcement(s['text']) if metadata['kind']=='asr' else s.get('announcement',False)
             def update(c):
-                c.update(words=words,asr_raw=raw)
-                align_words(c['segments'],words)
+                backup(c)
+                # Do not silently replace manually corrected sentence text.
+                if any(s.get('text_source')=='manual' for s in c['segments']):
+                    c.update(words=words,asr_raw=raw,transcript_warning='检测到人工校正文，已保留原分句。')
+                    return
+                preserve_practice(c['segments'],segments)
+                c.update(words=words,asr_raw=raw,segments=segments,current=0,
+                         segmentation='reference' if metadata['kind']=='web' else 'model',reference=metadata)
             store.update(course_id,update)
             return dict(course_id=course_id,words=len(words))
         return submit('asr:'+course_id,'asr',work,course_id)
+
+    @app.get('/api/cache')
+    def cache_info():
+        downloads=[]
+        for item in store.library():
+            path=store.folder(item['id'])/'audio.wav'
+            if item.get('source_id') and path.exists():
+                downloads.append(dict(id=item['id'],title=item['title'],bytes=path.stat().st_size))
+        incoming=data_root/'incoming'
+        temporary=[p for p in incoming.glob('*') if p.is_file() and p.stat().st_mtime<time.time()-86400]
+        return dict(downloads=downloads,download_bytes=sum(x['bytes'] for x in downloads),
+                    temporary_bytes=sum(p.stat().st_size for p in temporary))
+
+    @app.post('/api/cache/clear')
+    def clear_cache(body: dict):
+        removed=0
+        with job_lock,store.lock:
+            if any(j['status'] in ('queued','running') for j in jobs.values()):
+                raise HTTPException(409,'请先等待所有下载和识别任务完成。')
+            if body.get('downloads') is True:
+                for item in store.library():
+                    if not item.get('source_id'): continue
+                    path=store.folder(item['id'])/'audio.wav'
+                    if path.exists(): removed+=path.stat().st_size;path.unlink()
+            for path in (data_root/'incoming').glob('*'):
+                if path.is_file() and path.stat().st_mtime<time.time()-86400:
+                    removed+=path.stat().st_size;path.unlink()
+        return dict(removed_bytes=removed)
+
+    @app.post('/api/courses/{course_id}/restore-audio')
+    def restore_audio(course_id: str):
+        c=course(course_id);entry=entry_for(c);ensure_idle(course_id)
+        if not entry: raise ValueError('本地导入音频不会被缓存清理，请重新选择原文件。')
+        def work(report):
+            folder=store.folder(course_id);incoming=data_root/'incoming';incoming.mkdir(exist_ok=True)
+            source=incoming/(uuid.uuid4().hex+'.mp3');decoded=folder/'restore.wav'
+            try:
+                request=urllib.request.Request(entry['audio_url'],headers={'User-Agent':'Mozilla/5.0','Referer':entry['source_url']})
+                with direct_opener().open(request,timeout=40) as response,source.open('wb') as out:
+                    total=0
+                    while chunk:=response.read(512*1024):
+                        total+=len(chunk)
+                        if total>300*1024*1024: raise ValueError('音频超过限制。')
+                        out.write(chunk)
+                report(70,'正在恢复音频缓存…')
+                samples,rate=decode(source,decoded)
+                if abs(len(samples)/rate-c['duration'])>.25:
+                    raise ValueError('来源音频版本已变化，保留原记录，请手动核对。')
+                os.replace(decoded,folder/'audio.wav')
+                return dict(course_id=course_id,restored=True)
+            finally:
+                source.unlink(missing_ok=True);decoded.unlink(missing_ok=True)
+        return submit('restore:'+course_id,'restore',work,course_id)
 
     @app.get('/api/courses/{course_id}/export/{kind}')
     def export(course_id: str, kind: str):

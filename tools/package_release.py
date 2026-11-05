@@ -6,8 +6,8 @@ import argparse
 
 root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser()
-parser.add_argument('--folder',type=Path,default=root/'outputs/staging-v0.2.0/句听')
-parser.add_argument('--version',default='0.2.0')
+parser.add_argument('--folder',type=Path,default=root/'outputs/staging-v0.3.0/句听')
+parser.add_argument('--version',default='0.3.0')
 args=parser.parse_args()
 folder=args.folder
 archive=root/f'outputs/句听-Windows-v{args.version}.zip'

@@ -56,4 +56,4 @@ class Store:
                                          transcribed=bool(c.get('words'))))
                 except (ValueError, OSError, KeyError):
                     continue
-        return sorted(result, key=lambda c: c.get('created',''), reverse=True)
+        return sorted(result, key=lambda c: c.get('created') or '', reverse=True)

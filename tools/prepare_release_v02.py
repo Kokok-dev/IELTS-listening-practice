@@ -51,5 +51,5 @@ def install_update(stage:Path,target:Path,backup:Path):
 
 
 if __name__=='__main__':
-    result=install_update(ROOT/'outputs/staging-v0.2.0/句听',ROOT/'outputs/句听',ROOT/'outputs/backups'/('before-v0.2.0-'+datetime.now().strftime('%Y%m%d-%H%M%S')))
+    result=install_update(ROOT/'outputs/staging-v0.3.0/句听',ROOT/'outputs/句听',ROOT/'outputs/backups'/('before-v0.3.0-'+datetime.now().strftime('%Y%m%d-%H%M%S')))
     print(json.dumps(result,ensure_ascii=False),flush=True)

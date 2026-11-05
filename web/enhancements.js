@@ -29,7 +29,7 @@ class StudyController {
   }
   async changeMode(mode){if(mode===this.mode)return;await this.host.flush();this.host.stop();this.mode=mode;localStorage.setItem('juting-mode',mode);this.reset();this.host.render();}
   reset(){this.checked=false;this.hinted.clear();this.helpUsed=0;$('practiceFeedback').classList.add('hidden');}
-  accepts(s){return this.filter==='all'||this.filter==='unfinished'&&!s.done||this.filter==='review'&&s.practice?.needs_review||this.filter==='starred'&&s.starred;}
+  accepts(s){if($('skipAnnouncements')?.checked&&s.announcement)return false;const scope=$('practiceScope')?.value;if(scope==='key'&&!s.practice?.needs_review&&(s.text.match(/\S+/g)||[]).length<12)return false;if(scope==='sample'&&this.host.course().segments.indexOf(s)%3!==0&&!s.practice?.needs_review)return false;return this.filter==='all'||this.filter==='unfinished'&&!s.done||this.filter==='review'&&s.practice?.needs_review||this.filter==='starred'&&s.starred;}
   render(){
     const s=this.s;if(!s)return;
     document.querySelectorAll('[data-mode]').forEach(b=>{b.classList.toggle('active',b.dataset.mode===this.mode);b.setAttribute('aria-selected',String(b.dataset.mode===this.mode));});
@@ -94,7 +94,7 @@ class StudyController {
   bindWordButtons(root){root.querySelectorAll('[data-word]').forEach(button=>button.onclick=action(()=>{const start=Number(button.dataset.start),end=Number(button.dataset.end);return Number.isFinite(start)&&Number.isFinite(end)?this.host.play(start,{end,kind:'word'}):this.host.play();}));}
   renderReference(){
     if(!this.s)return;const revealed=this.host.isRevealed();$('checkBtn').innerHTML=icon('checkCircle')+'检查输入<kbd>Ctrl ↵</kbd>';$('revealBtn').textContent=revealed?'隐藏原文':'显示原文';$('editTextBtn').classList.toggle('hidden',!revealed);
-    const content=$('referenceContent');$('referenceHint').classList.toggle('hidden',!this.s.text||!(revealed||this.checked||this.hinted.size));
+    $('referenceHint').textContent=this.s.text_source==='web'?'来源网站参考文本；时间戳由本地音频匹配，对照准确率不代表雅思分数。':'本地模型识别参考，可能有误，可手动校正。';const content=$('referenceContent');$('referenceHint').classList.toggle('hidden',!this.s.text||!(revealed||this.checked||this.hinted.size));
     if(!this.s.text){content.className='reference-placeholder';content.innerHTML=icon('eyeOff')+'<p>参考原文尚未生成。<br><span>可以先听写，或使用本地模型生成原文。</span></p>';return;}
     if(!revealed&&!this.checked&&!this.hinted.size){content.className='reference-placeholder';content.innerHTML=icon('eyeOff')+'<p>先检查输入，再逐步找出漏听的词。<br><span>「提示一词」只揭开一个词；「显示原文」才展开整句。</span></p>';return;}
     const result=this.result();content.className='';content.innerHTML='<div class="reference-text assisted-reference">'+this.wordButtons(result.statuses,revealed)+'</div><div class="reference-actions"><span>已显示的词可以点击重听</span>'+(this.practice.needs_review?'<button id="clearReviewBtn" class="text-button">移出待复习</button>':'')+'</div>';

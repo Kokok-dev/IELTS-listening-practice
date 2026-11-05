@@ -11,7 +11,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def main():
     os.chdir(ROOT)
-    distribution=ROOT/'outputs/staging-v0.2.0'
+    distribution=ROOT/'outputs/staging-v0.3.0'
     distribution.resolve().relative_to(ROOT.resolve())
     cmd=[sys.executable,'-m','PyInstaller','--noconfirm','--windowed','--onedir',
          '--name','句听','--distpath',str(distribution),'--workpath','build',

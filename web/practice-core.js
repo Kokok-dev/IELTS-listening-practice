@@ -21,8 +21,9 @@
   function cloze(reference,percent=30){
     const words=tokens(reference),candidates=words.map((word,index)=>({index,key:normalize(word)})).filter(x=>x.key);
     const count=Math.max(1,Math.min(candidates.length,Math.round(candidates.length*percent/100)));
-    const selected=candidates.map(x=>({...x,rank:parseInt(hash(reference+'|'+x.index),36)})).sort((a,b)=>a.rank-b.rank).slice(0,count).map(x=>x.index).sort((a,b)=>a-b);
-    return {words,selected,signature:hash(reference+'|'+percent),percent};
+    const functionWords=new Set('a an the and or but so if as at by for from in into of on to up with is am are was were be been being do does did have has had i me my we our you your he him his she her it its they them their this that these those there here not no yes can could will would should may might very just also than then'.split(' '));
+    const selected=candidates.map(x=>({...x,priority:functionWords.has(x.key)?0:1,rank:parseInt(hash(reference+'|'+x.index),36)})).sort((a,b)=>b.priority-a.priority||a.rank-b.rank).slice(0,count).map(x=>x.index).sort((a,b)=>a-b);
+    return {words,selected,signature:hash('keywords-v2|'+reference+'|'+percent),percent};
   }
   function alignTimedWords(segment,words){
     const expected=tokens(segment.text),candidates=words.filter(w=>(w.start+w.end)/2>=segment.start-.03&&(w.start+w.end)/2<=segment.end+.03);

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+build/
+dist/
+outputs/
+data/
+models/
+*.log
+*.spec
+research/*.html
+research/*.json
+research/catalog-cache/

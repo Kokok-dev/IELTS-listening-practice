@@ -1,4 +1,4 @@
-#define AppVersion "0.3.0"
+#define AppVersion "0.3.7"
 #define SourceDir "..\outputs\staging-v0.3.0\句听"
 
 [Setup]

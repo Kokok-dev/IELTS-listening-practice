@@ -26,6 +26,8 @@ class StudyController {
     bind('rhythmBtn',()=>$('rhythmDialog').showModal());
     bind('repeatGap',()=>{this.interval=Number($('repeatGap').value);localStorage.setItem('juting-loop-gap',this.interval);},'change');
     bind('repeatCount',()=>{this.repeatLimit=Number($('repeatCount').value);localStorage.setItem('juting-loop-count',this.repeatLimit);},'change');
+    bind('translateSentence',()=>this.translateSentence());
+    bind('lookupWord',()=>showWordHelp($('lookupWordSelect').value,{retry:true}));
   }
   async changeMode(mode){if(mode===this.mode)return;await this.host.flush();this.host.stop();this.mode=mode;localStorage.setItem('juting-mode',mode);this.reset();this.host.render();}
   reset(){this.checked=false;this.hinted.clear();this.helpUsed=0;$('practiceFeedback').classList.add('hidden');}
@@ -48,13 +50,15 @@ class StudyController {
   renderCloze(){
     const target=$('clozeInput');if(!this.s.text){target.innerHTML='<p class="practice-unavailable">参考原文还没有生成。你可以先逐句听写，或点击右上角生成原文。</p>';return;}
     const {plan,answers}=this.clozeState();const selected=new Set(plan.selected);
-    target.innerHTML=plan.words.map((word,index)=>selected.has(index)?`<span class="cloze-slot"><input aria-label="第 ${index+1} 个词" data-cloze="${index}" value="${esc(answers[index]||'')}" autocomplete="off" spellcheck="false" style="--letters:${Math.max(5,Math.min(16,PracticeCore.normalize(word).length+1))}" class="${this.checked?(PracticeCore.normalize(answers[index])===PracticeCore.normalize(word)?'slot-correct':'slot-wrong'):''}"></span>`:`<span class="cloze-given">${esc(word)}</span>`).join(' ');
+    const ranges=PracticeCore.alignTimedWords(this.s,this.c.words||[]);
+    target.innerHTML=plan.words.map((word,index)=>selected.has(index)?`<span class="cloze-slot"><input aria-label="第 ${index+1} 个词" data-cloze="${index}" value="${esc(answers[index]||'')}" autocomplete="off" spellcheck="false" style="--letters:${Math.max(5,Math.min(16,PracticeCore.normalize(word).length+1))}" class="${this.checked?(PracticeCore.normalize(answers[index])===PracticeCore.normalize(word)?'slot-correct':'slot-wrong'):''}"></span>`:this.wordButton(word,index,'cloze-given',ranges[index])).join(' ');
+    this.bindWordButtons(target,true);
     target.querySelectorAll('[data-cloze]').forEach(input=>{input.addEventListener('input',()=>{answers[input.dataset.cloze]=input.value;input.classList.remove('slot-correct','slot-wrong');this.onInput();this.host.queue({practice:true});});input.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.ctrlKey){event.preventDefault();const fields=[...target.querySelectorAll('input')],i=fields.indexOf(input);fields[i+1]?.focus();}});});
   }
   renderShadow(){
     if(!this.s.text){$('shadowInput').innerHTML='<p class="practice-unavailable">生成参考原文后，可以使用点词重听与同步跟读。</p>';return;}
-    $('shadowInput').innerHTML='<p class="shadow-guide">听清楚 → 自己复述 → 点词重听。可在「播放节奏」中留出跟读时间。</p><div class="shadow-script">'+this.wordButtons(PracticeCore.tokens(this.s.text).map(()=> 'correct'),true)+'</div><div class="shadow-footer">基于本地音频回放，不使用在线语音评分。</div>';
-    this.bindWordButtons($('shadowInput'));
+    $('shadowInput').innerHTML='<p class="shadow-guide">听清楚 → 自己复述 → 点词重听并查看释义。</p><div class="shadow-script">'+this.wordButtons(PracticeCore.tokens(this.s.text).map(()=> 'correct'),true)+'</div>';
+    this.bindWordButtons($('shadowInput'),true);
   }
   result(){
     if(this.mode==='cloze'){
@@ -88,16 +92,75 @@ class StudyController {
     return words.map((word,index)=>{
       const status=statuses[index]||'unknown',visible=all||status==='correct'||status==='given'||this.hinted.has(index);
       if(!visible)return `<span class="masked-word ${status}" aria-label="第 ${index+1} 个词待听写">${PracticeCore.mask(word)}</span>`;
-      const timed=ranges[index],help=this.hinted.has(index);return `<button type="button" class="word-token ${help?'hinted':status}" data-word="${index}" ${timed?`data-start="${timed.start}" data-end="${timed.end}"`:''} title="${timed?'点击重听这个词':'暂无可靠词级定位，点击重听整句'}">${esc(word)}</button>`;
+      return this.wordButton(word,index,this.hinted.has(index)?'hinted':status,ranges[index]);
     }).join(' ');
   }
-  bindWordButtons(root){root.querySelectorAll('[data-word]').forEach(button=>button.onclick=action(()=>{const start=Number(button.dataset.start),end=Number(button.dataset.end);return Number.isFinite(start)&&Number.isFinite(end)?this.host.play(start,{end,kind:'word'}):this.host.play();}));}
+  wordButton(word,index,status,timed){
+    return `<button type="button" class="word-token ${status}" data-word="${index}" ${timed?`data-start="${timed.start}" data-end="${timed.end}"`:''} title="${timed?'点击重听这个词':'点击重听整句'}">${esc(word)}</button>`;
+  }
+  bindWordButtons(root,lookup=false){
+    root.querySelectorAll('[data-word]').forEach(button=>button.onclick=action(()=>{
+      const start=Number(button.dataset.start),end=Number(button.dataset.end);
+      const playback=Number.isFinite(start)&&Number.isFinite(end)?this.host.play(start,{end,kind:'word'}):this.host.play();
+      return lookup?Promise.all([playback,showWordHelp(button.textContent)]):playback;
+    }));
+  }
+  canTranslate(){return Boolean(this.s?.text&&(this.mode==='shadow'||this.host.isRevealed()));}
+  renderLanguagePanel(){
+    const text=this.s?.text||'',canTranslate=this.canTranslate();
+    if(this.translationSegment!==this.s||this.translationText!==text||!canTranslate){
+      this.translationRequest?.abort();
+      this.translationRequest=null;
+      $('translationResult').textContent='';
+      this.translationSegment=this.s;
+      this.translationText=text;
+    }
+    $('translateSentence').disabled=!canTranslate||Boolean(this.translationRequest);
+    $('translationHint').textContent=canTranslate?'按需查看中文翻译。':'显示原文后可查看整句翻译。';
+    const visibleWords=new Set();
+    if(text){
+      const words=PracticeCore.tokens(text);
+      const statuses=this.checked?this.result().statuses:[];
+      const blanks=this.mode==='cloze'?new Set(this.clozeState().plan.selected):null;
+      words.forEach((word,index)=>{
+        if(!canTranslate&&!this.hinted.has(index)&&statuses[index]!=='correct'&&!(blanks&&!blanks.has(index)))return;
+        const normalized=lookupWordKey(word);
+        if(normalized)visibleWords.add(normalized);
+      });
+    }
+    const select=$('lookupWordSelect'),selected=select.value;
+    select.replaceChildren(new Option(visibleWords.size?'选择已显示的词':'暂无已显示的词',''));
+    for(const word of visibleWords)select.add(new Option(word,word));
+    if(visibleWords.has(selected))select.value=selected;
+    select.disabled=!visibleWords.size;
+    const updateLookup=()=>{$('lookupWord').disabled=!select.value;};
+    select.onchange=updateLookup;updateLookup();
+  }
+  async translateSentence(){
+    if(!this.canTranslate()||this.translationRequest)return;
+    const request=new AbortController();
+    this.translationRequest=request;
+    const result=$('translationResult');
+    $('translateSentence').disabled=true;
+    result.textContent='正在翻译…';
+    const timer=setTimeout(()=>request.abort(),12000);
+    try{
+      const translated=await translateEnglish(this.s.text.trim(),request.signal);
+      if(this.translationRequest===request)result.textContent=translated;
+    }catch(error){
+      if(this.translationRequest===request)result.textContent=request.signal.aborted?'查询超时，请重试。':error.message;
+    }finally{
+      clearTimeout(timer);
+      if(this.translationRequest===request){this.translationRequest=null;$('translateSentence').disabled=!this.canTranslate();}
+    }
+  }
   renderReference(){
+    this.renderLanguagePanel();
     if(!this.s)return;const revealed=this.host.isRevealed();$('checkBtn').innerHTML=icon('checkCircle')+'检查输入<kbd>Ctrl ↵</kbd>';$('revealBtn').textContent=revealed?'隐藏原文':'显示原文';$('editTextBtn').classList.toggle('hidden',!revealed);
     $('referenceHint').textContent=this.s.text_source==='web'?'来源网站参考文本；时间戳由本地音频匹配，对照准确率不代表雅思分数。':'本地模型识别参考，可能有误，可手动校正。';const content=$('referenceContent');$('referenceHint').classList.toggle('hidden',!this.s.text||!(revealed||this.checked||this.hinted.size));
     if(!this.s.text){content.className='reference-placeholder';content.innerHTML=icon('eyeOff')+'<p>参考原文尚未生成。<br><span>可以先听写，或使用本地模型生成原文。</span></p>';return;}
     if(!revealed&&!this.checked&&!this.hinted.size){content.className='reference-placeholder';content.innerHTML=icon('eyeOff')+'<p>先检查输入，再逐步找出漏听的词。<br><span>「提示一词」只揭开一个词；「显示原文」才展开整句。</span></p>';return;}
-    const result=this.result();content.className='';content.innerHTML='<div class="reference-text assisted-reference">'+this.wordButtons(result.statuses,revealed)+'</div><div class="reference-actions"><span>已显示的词可以点击重听</span>'+(this.practice.needs_review?'<button id="clearReviewBtn" class="text-button">移出待复习</button>':'')+'</div>';
+    const result=this.result();content.className='';content.innerHTML='<div class="reference-text assisted-reference">'+this.wordButtons(result.statuses,revealed)+'</div><div class="reference-actions"><span>点击已显示的词可重听</span>'+(this.practice.needs_review?'<button id="clearReviewBtn" class="text-button">移出待复习</button>':'')+'</div>';
     this.bindWordButtons(content);if($('clearReviewBtn'))$('clearReviewBtn').onclick=()=>{this.practice.needs_review=false;this.host.queue({practice:true});this.renderReference();this.host.list();$('practiceBadge').textContent='';};
     $('referenceHint').textContent=this.s.text_source==='manual'?'人工校正的参考原文；对照准确率不代表雅思分数。':'本地 AI 参考，可能有误。点词定位来自识别时间戳；可校正原文。';
   }

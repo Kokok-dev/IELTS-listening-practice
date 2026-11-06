@@ -10,7 +10,7 @@ Windows 本地精听工具。导入音频后先提供停顿预览，识别后按
 
 ## Windows 使用
 
-安装版：运行 `outputs/句听-安装程序-v0.2.0.exe`，按向导选择目录并创建快捷方式。通过快捷方式启动时，学习记录保存在 `%LOCALAPPDATA%\Juting\data`；卸载保留记录。安装包不包含个人音频和示例学习记录。迁移便携版记录见 [安装说明](installer/安装说明.md)。
+安装版可从 Releases 下载。运行安装程序后，按向导选择目录并创建快捷方式。通过快捷方式启动时，学习记录保存在 `%LOCALAPPDATA%\Juting\data`，卸载时会保留。迁移便携版记录见 [安装说明](installer/安装说明.md)。
 
 打开 `outputs/句听/句听.exe`。无需 Python，无需 API Key。请保留同目录的 `_internal`、`models` 和 `data` 文件夹。
 
